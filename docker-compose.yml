@@ -1,0 +1,113 @@
+volumes:
+  ny_taxi_postgres_data:
+    driver: local
+  kestra_postgres_data:
+    driver: local
+  pgadmin_data:
+    driver: local
+  kestra_data:
+    driver: local
+  clickhouse_data:
+    driver: local
+  clickhouse_logs:
+    driver: local
+
+networks:
+  pipeline_network:
+    driver: bridge
+
+services:
+  pgdatabase:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: ny_taxi
+    ports:
+      - "5432:5432"
+    volumes:
+      - ny_taxi_postgres_data:/var/lib/postgresql  # Fixed: removed pgadmin_data
+      - ./Ecommerse_Dataset:/docker-entrypoint-initdb.d/data:ro
+    networks:
+      - pipeline_network
+    
+  pgadmin:
+    image: dpage/pgadmin4
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@admin.com
+      PGADMIN_DEFAULT_PASSWORD: root
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
+      PGADMIN_CONFIG_WTF_CSRF_CHECK_DEFAULT: "False"
+      PGADMIN_CONFIG_WTF_CSRF_ENABLED: "False"
+    ports:
+      - "8085:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin  # Added: pgadmin volume here
+    depends_on:
+      - pgdatabase
+    networks:
+      - pipeline_network
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - pipeline_network
+
+  dbt:
+    image: ghcr.io/dbt-labs/dbt-postgres:latest
+    environment:
+      DBT_PROFILES_DIR: /root/.dbt
+      DBT_PROJECT_DIR: /usr/app/dbt/analytics  # Fixed: point to analytics folder
+    volumes:
+      - ./dbt:/usr/app/dbt
+      - ./dbt/profiles.yml:/root/.dbt/profiles.yml
+    depends_on:
+      - pgdatabase
+      - clickhouse
+    entrypoint: /bin/bash
+    command: -c "sleep infinity"
+    networks:
+      - pipeline_network  # Added: this was missing!
+
+  kestra:
+    image: kestra/kestra:latest
+    pull_policy: always
+    command: server standalone
+    volumes:
+      - kestra_data:/app/storage
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/outputs:/tmp/outputs
+    environment:
+      KESTRA_CONFIGURATION: |
+        kestra:
+          server:
+            basic-auth:
+              enabled: false
+          repository:
+            type: h2
+          storage:
+            type: local
+            local:
+              base-path: /app/storage
+          queue:
+            type: h2
+    ports:
+      - "8081:8080"
+    networks:
+      - pipeline_network
+    restart: unless-stopped
